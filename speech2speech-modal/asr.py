@@ -22,9 +22,10 @@ class ASRService:
         )
 
     @modal.method()
-    def transcribe(self, audio_bytes: bytes) -> str:
+    def transcribe(self, audio_bytes: bytes) -> dict:
         import tempfile
         import os
+        import time
         
         # Save bytes to a temp file since NeMo expects file paths
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
@@ -32,7 +33,10 @@ class ASRService:
             temp_path = f.name
         
         try:
+            t0 = time.time()
             result = self.model.transcribe([temp_path])
-            return result[0] if result else ""
+            elapsed = time.time() - t0
+            text = result[0] if result else ""
+            return {"text": text, "time": elapsed}
         finally:
             os.unlink(temp_path)

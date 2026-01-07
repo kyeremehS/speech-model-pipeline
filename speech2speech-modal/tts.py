@@ -15,12 +15,16 @@ class TTSService:
         self.tts = ChatterboxTTS.from_pretrained(device="cuda")
 
     @modal.method()
-    def speak(self, text: str) -> bytes:
+    def speak(self, text: str) -> dict:
         import io
         import numpy as np
+        import time
         from scipy.io import wavfile
         
+        t0 = time.time()
         wav = self.tts.generate(text)
+        elapsed = time.time() - t0
+        
         # Convert to numpy and ensure correct shape
         audio_np = wav.cpu().numpy()
         if audio_np.ndim > 1:
@@ -30,4 +34,4 @@ class TTSService:
         # Write to wav bytes
         buffer = io.BytesIO()
         wavfile.write(buffer, 24000, audio_np)
-        return buffer.getvalue()
+        return {"audio": buffer.getvalue(), "time": elapsed}

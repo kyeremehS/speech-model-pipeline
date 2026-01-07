@@ -25,8 +25,9 @@ class LLMService:
         ).eval()
 
     @modal.method()
-    def generate(self, text: str) -> str:
+    def generate(self, text: str) -> dict:
         import re
+        import time
         
         # Handle if text is a list
         if isinstance(text, list):
@@ -44,6 +45,8 @@ class LLMService:
             enable_thinking=False  # Disable thinking mode for Qwen3
         )
         inputs = self.tokenizer(prompt, return_tensors="pt")
+        
+        t0 = time.time()
         outputs = self.model.generate(
             **inputs, 
             max_new_tokens=100,
@@ -51,6 +54,8 @@ class LLMService:
             temperature=0.7,
             pad_token_id=self.tokenizer.eos_token_id
         )
+        elapsed = time.time() - t0
+        
         # Decode response
         full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
         
@@ -68,4 +73,4 @@ class LLMService:
         response = re.sub(r'<[^>]+>', '', response)
         response = response.strip()
         
-        return response
+        return {"text": response, "time": elapsed}
