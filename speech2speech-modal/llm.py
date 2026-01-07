@@ -26,6 +26,46 @@ class LLMService:
 
     @modal.method()
     def generate(self, text: str) -> str:
-        inputs = self.tokenizer(text, return_tensors="pt")
-        outputs = self.model.generate(**inputs, max_new_tokens=128)
-        return self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        import re
+        
+        # Handle if text is a list
+        if isinstance(text, list):
+            text = text[0] if text else ""
+        
+        # Create a conversational prompt with /no_think to disable thinking
+        messages = [
+            {"role": "system", "content": "You are a helpful voice assistant. Respond naturally and concisely. Keep responses brief (1-2 sentences) and suitable for text-to-speech. Do not use markdown or special formatting."},
+            {"role": "user", "content": text}
+        ]
+        prompt = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True,
+            enable_thinking=False  # Disable thinking mode for Qwen3
+        )
+        inputs = self.tokenizer(prompt, return_tensors="pt")
+        outputs = self.model.generate(
+            **inputs, 
+            max_new_tokens=100,
+            do_sample=True,
+            temperature=0.7,
+            pad_token_id=self.tokenizer.eos_token_id
+        )
+        # Decode response
+        full_response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Remove any thinking tags if present
+        response = re.sub(r'<think>.*?</think>', '', full_response, flags=re.DOTALL)
+        
+        # Extract assistant response - look for content after the last role marker
+        if "assistant" in response.lower():
+            parts = response.lower().split("assistant")
+            response = parts[-1]
+        
+        # Clean up the response
+        response = response.strip()
+        # Remove any remaining tags or markers
+        response = re.sub(r'<[^>]+>', '', response)
+        response = response.strip()
+        
+        return response
