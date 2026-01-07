@@ -3,8 +3,8 @@ import modal
 
 @app.cls(
     image=image,
-    cpu=4,              # 👈 start on CPU
-    memory=16,
+    cpu=4,
+    memory=16384,  # 16 GB in MiB
     min_containers=1,
 )
 class LLMService:
@@ -13,10 +13,15 @@ class LLMService:
     def load_model(self):
         from transformers import AutoTokenizer, AutoModelForCausalLM
         import torch
-        self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-1.7B")
+        # Qwen3 requires trust_remote_code=True
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            "Qwen/Qwen3-1.7B",
+            trust_remote_code=True
+        )
         self.model = AutoModelForCausalLM.from_pretrained(
             "Qwen/Qwen3-1.7B",
             torch_dtype=torch.float16,
+            trust_remote_code=True
         ).eval()
 
     @modal.method()

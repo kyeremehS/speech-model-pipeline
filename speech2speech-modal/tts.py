@@ -11,9 +11,23 @@ class TTSService:
     @modal.enter()
     def load_model(self):
         from chatterbox.tts import ChatterboxTTS
-        self.tts = ChatterboxTTS.from_pretrained("chatterbox")
+        # Specify device explicitly - "cuda" for GPU
+        self.tts = ChatterboxTTS.from_pretrained(device="cuda")
 
     @modal.method()
     def speak(self, text: str) -> bytes:
+        import io
+        import numpy as np
+        from scipy.io import wavfile
+        
         wav = self.tts.generate(text)
-        return wav.tobytes()
+        # Convert to numpy and ensure correct shape
+        audio_np = wav.cpu().numpy()
+        if audio_np.ndim > 1:
+            audio_np = audio_np.flatten()
+        # Normalize to int16 range
+        audio_np = (audio_np * 32767).astype(np.int16)
+        # Write to wav bytes
+        buffer = io.BytesIO()
+        wavfile.write(buffer, 24000, audio_np)
+        return buffer.getvalue()

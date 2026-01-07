@@ -18,3 +18,4 @@ def main(audio_path: str):
 
     with open("output.wav", "wb") as f:
         f.write(speech)
+
