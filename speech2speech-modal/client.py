@@ -6,19 +6,59 @@ import sounddevice as sd
 import webrtcvad
 import io
 from scipy.io import wavfile
+from datetime import datetime
 
-# Import Modal app and services
-from common import app
-from asr import ASRService
-from llm import LLMService
-from tts import TTSService
+import modal
 
 # Audio configuration
 SAMPLE_RATE = 16000
 FRAME_DURATION_MS = 30
 FRAME_SIZE = int(SAMPLE_RATE * FRAME_DURATION_MS / 1000)
 VAD_LEVEL = 3
-SILENCE_THRESHOLD_MS = 10000 # Stop recording after 1 second of silence
+SILENCE_THRESHOLD_MS = 1000  # Stop recording after 1 second of silence
+
+# Session metrics tracking
+class SessionMetrics:
+    def __init__(self):
+        self.calls = []
+        self.start_time = datetime.now()
+    
+    def add_call(self, metrics: dict, network_time: float, record_time: float):
+        self.calls.append({
+            **metrics,
+            "network_overhead": network_time - metrics.get("total_pipeline", 0),
+            "record_time": record_time,
+            "e2e_time": record_time + network_time,
+        })
+    
+    def print_summary(self):
+        if not self.calls:
+            return
+        
+        n = len(self.calls)
+        avg = lambda key: sum(c.get(key, 0) for c in self.calls) / n
+        
+        print("\n" + "="*70)
+        print(f"{'SESSION SUMMARY':^70}")
+        print("="*70)
+        print(f"Total calls: {n}")
+        print(f"Session duration: {(datetime.now() - self.start_time).seconds}s")
+        print("-"*70)
+        print(f"{'Metric':<25} | {'Average':<12} | {'Min':<12} | {'Max':<12}")
+        print("-"*70)
+        
+        for key, label in [
+            ("asr_time", "ASR Time"),
+            ("llm_time", "LLM Time"),
+            ("tts_time", "TTS Time"),
+            ("total_pipeline", "Pipeline Total"),
+            ("network_overhead", "Network Overhead"),
+            ("e2e_time", "End-to-End"),
+        ]:
+            vals = [c.get(key, 0) for c in self.calls]
+            print(f"{label:<25} | {avg(key):<12.3f} | {min(vals):<12.3f} | {max(vals):<12.3f}")
+        
+        print("="*70)
 
 class AudioRecorder:
     def __init__(self):
@@ -81,97 +121,115 @@ def play_audio(wav_bytes):
     sd.play(data, samplerate)
     sd.wait()
 
+def print_metrics(metrics: dict, network_time: float, record_time: float):
+    """Print detailed latency breakdown."""
+    asr = metrics.get("asr_time", 0)
+    llm = metrics.get("llm_time", 0)
+    tts = metrics.get("tts_time", 0)
+    pipeline = metrics.get("total_pipeline", 0)
+    input_dur = metrics.get("input_duration", 0)
+    output_dur = metrics.get("output_duration", 0)
+    input_chars = metrics.get("input_chars", 0)
+    output_chars = metrics.get("output_chars", 0)
+    input_tokens = metrics.get("input_tokens", 0)
+    output_tokens = metrics.get("output_tokens", 0)
+    
+    network_overhead = network_time - pipeline
+    e2e = record_time + network_time
+    rtf = network_time / max(input_dur, 0.1)
+    
+    print("\n" + "="*70)
+    print(f"{'LATENCY BREAKDOWN':^70}")
+    print("="*70)
+    print(f"{'Component':<18} | {'Time (s)':<10} | {'%':<8} | {'Details':<26}")
+    print("-"*70)
+    print(f"{'Recording':<18} | {record_time:<10.3f} | {'-':<8} | {input_dur:.1f}s audio captured")
+    print("-"*70)
+    print(f"{'ASR (NeMo RNNT)':<18} | {asr:<10.3f} | {asr/pipeline*100:>6.1f}% | {input_dur:.1f}s → {input_chars} chars")
+    print(f"{'LLM (Phi-3-Mini)':<18} | {llm:<10.3f} | {llm/pipeline*100:>6.1f}% | {input_tokens}→{output_tokens} tokens")
+    print(f"{'TTS (Chatterbox)':<18} | {tts:<10.3f} | {tts/pipeline*100:>6.1f}% | {output_chars} chars → {output_dur:.1f}s")
+    print("-"*70)
+    print(f"{'Pipeline Total':<18} | {pipeline:<10.3f} | {'100%':<8} | Modal compute time")
+    print(f"{'Network Overhead':<18} | {network_overhead:<10.3f} | {'-':<8} | Serialization + transfer")
+    print("-"*70)
+    print(f"{'End-to-End':<18} | {e2e:<10.3f} | {'-':<8} | Record → Response ready")
+    print("="*70)
+    print(f"  RTF (Real-Time Factor): {rtf:.2f}x | "
+          f"Throughput: {output_dur/network_time:.2f}x realtime")
+    print("="*70 + "\n")
+
+
 def main():
     print("🚀 Starting real-time speech-to-speech client...")
+    print("   Connecting to Modal...")
+    
+    # Get the deployed function
+    try:
+        process_speech = modal.Function.from_name("speech-to-speech", "process_speech")
+    except modal.exception.NotFoundError:
+        print("❌ Error: App not deployed. Run 'modal deploy main.py' first.")
+        sys.exit(1)
+    
+    print("✅ Connected to Modal services.")
+    print("   Press Ctrl+C to exit and see session summary.\n")
     
     recorder = AudioRecorder()
+    session = SessionMetrics()
     
-    # Run the Modal app context
-    with app.run():
-        asr = ASRService()
-        llm = LLMService()
-        tts = TTSService()
-        
-        print("✅ Connected to Modal services.")
-        
-        while True:
-            try:
-                # 1. Record
-                audio_data = recorder.record_until_silence()
-                if audio_data is None:
-                    break
-                
-                if len(audio_data) == 0:
-                    continue
-
-                # Create WAV container for the raw PCM data
-                wav_buffer = io.BytesIO()
-                wavfile.write(wav_buffer, SAMPLE_RATE, audio_data)
-                wav_bytes = wav_buffer.getvalue()
-                
-                # 2. Transcribe
-                print("📝 Transcribing...")
-                t0_asr = time.time()
-                asr_result = asr.transcribe.remote(wav_bytes)
-                t_asr_network = time.time() - t0_asr
-                
-                # Handle potential list return or dict
-                if isinstance(asr_result, list):
-                    asr_result = asr_result[0] if asr_result else {}
-                
-                text = asr_result.get("text", "")
-                t_asr_model = asr_result.get("time", 0.0)
-                
-                print(f"📝 You said: {text} (Model: {t_asr_model:.3f}s, Total: {t_asr_network:.3f}s)")
-                
-                if not text or not text.strip():
-                    print("⚠️ No speech detected in transcription.")
-                    continue
-                    
-                # 3. Generate
-                print("🤖 Thinking...")
-                t0_llm = time.time()
-                llm_result = llm.generate.remote(text)
-                t_llm_network = time.time() - t0_llm
-                
-                response = llm_result.get("text", "")
-                t_llm_model = llm_result.get("time", 0.0)
-                
-                print(f"💬 Response: {response} (Model: {t_llm_model:.3f}s, Total: {t_llm_network:.3f}s)")
-                
-                # 4. TTS
-                print("🔊 Synthesizing...")
-                t0_tts = time.time()
-                tts_result = tts.speak.remote(response)
-                t_tts_network = time.time() - t0_tts
-                
-                audio_response = tts_result.get("audio", b"")
-                t_tts_model = tts_result.get("time", 0.0)
-                
-                print(f"✅ Audio received (Model: {t_tts_model:.3f}s, Total: {t_tts_network:.3f}s)")
-                
-                # Print Benchmark Table
-                print("\n" + "="*50)
-                print(f"{'Component':<15} | {'Model (s)':<12} | {'Network+Overhead (s)':<18}")
-                print("-" * 50)
-                print(f"{'ASR':<15} | {t_asr_model:<12.3f} | {t_asr_network - t_asr_model:<18.3f}")
-                print(f"{'LLM':<15} | {t_llm_model:<12.3f} | {t_llm_network - t_llm_model:<18.3f}")
-                print(f"{'TTS':<15} | {t_tts_model:<12.3f} | {t_tts_network - t_tts_model:<18.3f}")
-                print("-" * 50)
-                print(f"{'Total':<15} | {t_asr_model+t_llm_model+t_tts_model:<12.3f} | {(t_asr_network+t_llm_network+t_tts_network) - (t_asr_model+t_llm_model+t_tts_model):<18.3f}")
-                print("="*50 + "\n")
-
-                # 5. Play
-                play_audio(audio_response)
-                
-            except KeyboardInterrupt:
-                print("\n👋 Exiting...")
+    while True:
+        try:
+            # 1. Record
+            t_record_start = time.time()
+            audio_data = recorder.record_until_silence()
+            record_time = time.time() - t_record_start
+            
+            if audio_data is None:
                 break
-            except Exception as e:
-                print(f"❌ Error: {e}")
-                # Optional: break or continue depending on severity
-                # import traceback
-                # traceback.print_exc()
+            
+            if len(audio_data) == 0:
+                continue
+
+            # Create WAV container for the raw PCM data
+            wav_buffer = io.BytesIO()
+            wavfile.write(wav_buffer, SAMPLE_RATE, audio_data)
+            wav_bytes = wav_buffer.getvalue()
+            
+            # 2. Process through pipeline (ASR -> LLM -> TTS)
+            print("🚀 Processing speech-to-speech...")
+            t0 = time.time()
+            result = process_speech.remote(wav_bytes)
+            network_time = time.time() - t0
+            
+            # Extract audio and metrics
+            if isinstance(result, dict):
+                audio_response = result.get("audio", b"")
+                metrics = result.get("metrics", {})
+                transcription = result.get("transcription", "")
+                response = result.get("response", "")
+                
+                print(f"\n📝 You said: \"{transcription}\"")
+                print(f"💬 Response: \"{response}\"")
+                
+                # Print detailed metrics
+                print_metrics(metrics, network_time, record_time)
+                
+                # Track session metrics
+                session.add_call(metrics, network_time, record_time)
+            else:
+                audio_response = result
+                print(f"✅ Response received in {network_time:.2f}s")
+
+            # 3. Play
+            play_audio(audio_response)
+            
+        except KeyboardInterrupt:
+            print("\n👋 Exiting...")
+            session.print_summary()
+            break
+        except Exception as e:
+            print(f"❌ Error: {e}")
+            import traceback
+            traceback.print_exc()
 
 if __name__ == "__main__":
     main()
