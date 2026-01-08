@@ -9,6 +9,7 @@ from scipy.io import wavfile
 from datetime import datetime
 
 import modal
+from audio_compression import compress_wav_to_mp3, decompress_mp3_to_wav, get_compression_ratio
 
 # Audio configuration
 SAMPLE_RATE = 16000
@@ -112,10 +113,46 @@ class AudioRecorder:
         # Flatten audio buffer
         return np.concatenate(audio_buffer)
 
-def play_audio(wav_bytes):
-    # Read wav bytes
-    with io.BytesIO(wav_bytes) as f:
-        samplerate, data = wavfile.read(f)
+def play_audio(audio_bytes):
+    """Play audio bytes (handles both WAV and MP3)."""
+    # Check file format from header bytes
+    header = audio_bytes[:4]
+    is_wav = header[:4] == b'RIFF' or header[:4] == b'RIFX'
+    is_mp3 = header[:3] == b'ID3' or header[:2] == b'\xff\xfb' or header[:2] == b'\xff\xfa'
+    
+    if is_mp3 or not is_wav:
+        # MP3 or unknown format - try to convert using pydub
+        try:
+            from pydub import AudioSegment
+            audio = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
+            # Convert to numpy array for sounddevice
+            samples = np.array(audio.get_array_of_samples())
+            if audio.channels == 2:
+                samples = samples.reshape((-1, 2))
+            samplerate = audio.frame_rate
+            data = samples
+        except Exception as e:
+            print(f"⚠️ pydub failed: {e}. Trying ffmpeg fallback...")
+            # Fallback: save to temp file and use ffmpeg via pydub
+            import tempfile
+            import os
+            with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp:
+                tmp.write(audio_bytes)
+                tmp_path = tmp.name
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(tmp_path)
+                samples = np.array(audio.get_array_of_samples())
+                if audio.channels == 2:
+                    samples = samples.reshape((-1, 2))
+                samplerate = audio.frame_rate
+                data = samples
+            finally:
+                os.unlink(tmp_path)
+    else:
+        # WAV - read directly
+        with io.BytesIO(audio_bytes) as f:
+            samplerate, data = wavfile.read(f)
     
     print(f"🔊 Playing response ({len(data)/samplerate:.1f}s)...")
     sd.play(data, samplerate)
@@ -126,13 +163,17 @@ def print_metrics(metrics: dict, network_time: float, record_time: float):
     asr = metrics.get("asr_time", 0)
     llm = metrics.get("llm_time", 0)
     tts = metrics.get("tts_time", 0)
-    pipeline = metrics.get("total_pipeline", 0)
+    # Handle both old key (total_pipeline) and new key (total_time)
+    pipeline = metrics.get("total_pipeline", 0) or metrics.get("total_time", 0)
     input_dur = metrics.get("input_duration", 0)
     output_dur = metrics.get("output_duration", 0)
     input_chars = metrics.get("input_chars", 0)
     output_chars = metrics.get("output_chars", 0)
-    input_tokens = metrics.get("input_tokens", 0)
-    output_tokens = metrics.get("output_tokens", 0)
+    input_tokens = metrics.get("input_tokens", len(str(input_chars).split()))
+    output_tokens = metrics.get("output_tokens", len(str(output_chars).split()))
+    
+    # Avoid division by zero
+    pipeline = max(pipeline, 0.001)
     
     network_overhead = network_time - pipeline
     e2e = record_time + network_time
@@ -149,13 +190,13 @@ def print_metrics(metrics: dict, network_time: float, record_time: float):
     print(f"{'LLM (Phi-3-Mini)':<18} | {llm:<10.3f} | {llm/pipeline*100:>6.1f}% | {input_tokens}→{output_tokens} tokens")
     print(f"{'TTS (Chatterbox)':<18} | {tts:<10.3f} | {tts/pipeline*100:>6.1f}% | {output_chars} chars → {output_dur:.1f}s")
     print("-"*70)
-    print(f"{'Pipeline Total':<18} | {pipeline:<10.3f} | {'100%':<8} | Modal compute time")
-    print(f"{'Network Overhead':<18} | {network_overhead:<10.3f} | {'-':<8} | Serialization + transfer")
+    print(f"{'Pipeline Total':<18} | {pipeline:<10.3f} | {'100%':<8} | Single container")
+    print(f"{'Network Overhead':<18} | {max(network_overhead, 0):<10.3f} | {'-':<8} | Serialization + transfer")
     print("-"*70)
     print(f"{'End-to-End':<18} | {e2e:<10.3f} | {'-':<8} | Record → Response ready")
     print("="*70)
     print(f"  RTF (Real-Time Factor): {rtf:.2f}x | "
-          f"Throughput: {output_dur/network_time:.2f}x realtime")
+          f"Throughput: {output_dur/max(network_time, 0.1):.2f}x realtime")
     print("="*70 + "\n")
 
 
@@ -194,10 +235,17 @@ def main():
             wavfile.write(wav_buffer, SAMPLE_RATE, audio_data)
             wav_bytes = wav_buffer.getvalue()
             
+            # Compress audio to reduce network overhead
+            print(f"📦 Original WAV: {len(wav_bytes)} bytes")
+            compressed_bytes = compress_wav_to_mp3(wav_bytes)
+            print(f"📦 Compressed MP3: {len(compressed_bytes)} bytes")
+            compression_ratio = get_compression_ratio(len(wav_bytes), len(compressed_bytes))
+            print(f"📦 Compression ratio: {compression_ratio:.1f}x")
+            
             # 2. Process through pipeline (ASR -> LLM -> TTS)
             print("🚀 Processing speech-to-speech...")
             t0 = time.time()
-            result = process_speech.remote(wav_bytes)
+            result = process_speech.remote(compressed_bytes)
             network_time = time.time() - t0
             
             # Extract audio and metrics
@@ -219,7 +267,12 @@ def main():
                 audio_response = result
                 print(f"✅ Response received in {network_time:.2f}s")
 
-            # 3. Play
+            # 3. Play (decompress if needed)
+            if isinstance(result, dict) and result.get("compressed", False):
+                # Decompress the audio response
+                audio_response = decompress_mp3_to_wav(audio_response)
+                print(f"📦 Decompressed response: {len(audio_response)} bytes")
+            
             play_audio(audio_response)
             
         except KeyboardInterrupt:
