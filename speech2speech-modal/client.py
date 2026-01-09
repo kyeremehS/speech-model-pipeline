@@ -114,7 +114,7 @@ class AudioRecorder:
         return np.concatenate(audio_buffer)
 
 def play_audio(audio_bytes):
-    """Play audio bytes (handles both WAV and MP3)."""
+    """Play audio bytes (handles both WAV and MP3). Returns immediately, plays in background."""
     # Check file format from header bytes
     header = audio_bytes[:4]
     is_wav = header[:4] == b'RIFF' or header[:4] == b'RIFX'
@@ -204,11 +204,11 @@ def main():
     print("🚀 Starting real-time speech-to-speech client...")
     print("   Connecting to Modal...")
     
-    # Get the deployed function
+    # Use batch mode (streaming has issues with Modal generator nesting)
     try:
         process_speech = modal.Function.from_name("speech-to-speech", "process_speech")
     except modal.exception.NotFoundError:
-        print("❌ Error: App not deployed. Run 'modal deploy main.py' first.")
+        print("❌ Error: App not deployed. Run 'modal deploy modular_main.py' first.")
         sys.exit(1)
     
     print("✅ Connected to Modal services.")
@@ -243,8 +243,10 @@ def main():
             print(f"📦 Compression ratio: {compression_ratio:.1f}x")
             
             # 2. Process through pipeline (ASR -> LLM -> TTS)
-            print("🚀 Processing speech-to-speech...")
             t0 = time.time()
+            
+            # BATCH MODE: Wait for full response
+            print("🚀 Processing...")
             result = process_speech.remote(compressed_bytes)
             network_time = time.time() - t0
             
@@ -258,20 +260,15 @@ def main():
                 print(f"\n📝 You said: \"{transcription}\"")
                 print(f"💬 Response: \"{response}\"")
                 
-                # Print detailed metrics
                 print_metrics(metrics, network_time, record_time)
-                
-                # Track session metrics
                 session.add_call(metrics, network_time, record_time)
             else:
                 audio_response = result
                 print(f"✅ Response received in {network_time:.2f}s")
 
-            # 3. Play (decompress if needed)
+            # Decompress and play
             if isinstance(result, dict) and result.get("compressed", False):
-                # Decompress the audio response
                 audio_response = decompress_mp3_to_wav(audio_response)
-                print(f"📦 Decompressed response: {len(audio_response)} bytes")
             
             play_audio(audio_response)
             

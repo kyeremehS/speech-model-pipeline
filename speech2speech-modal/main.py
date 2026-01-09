@@ -77,7 +77,8 @@ def decompress_mp3_to_wav(mp3_bytes: bytes) -> bytes:
     image=image,
     gpu="A10G",
     min_containers=1,
-    timeout=600,
+    timeout=1800,
+    secrets=[modal.Secret.from_name("hf-secret")],
 )
 class SpeechToSpeechService:
     """
@@ -138,7 +139,9 @@ class SpeechToSpeechService:
         
         # 3. TTS Model
         print("\n🔊 [3/3] Loading ChatterboxTTS Turbo...")
-        self.tts_model = ChatterboxTTS.from_pretrained(model_name="chatterbox-turbo", device="cuda")
+        from chatterbox.tts_turbo import ChatterboxTurboTTS
+        
+        self.tts_model = ChatterboxTurboTTS.from_pretrained(device="cuda")
         print("✅ TTS model loaded")
         
         # Check VRAM usage
