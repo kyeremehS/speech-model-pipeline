@@ -25,6 +25,9 @@ Usage:
     
     # Test locally
     modal run modular_main.py --audio-path input.wav
+
+    $env:ASR_MODEL="nemo"; $env:LLM_MODEL="gpt4omini"; $env:TTS_MODEL="chatterbox"; modal deploy modular_main.py
+
 """
 import modal
 import os
@@ -32,9 +35,7 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Optional, Dict
 from dataclasses import dataclass
 
-# =============================================================================
 # Audio Compression Utilities (Inlined for Modal compatibility)
-# =============================================================================
 
 def compress_wav_to_mp3(wav_bytes: bytes, bitrate: int = 64) -> bytes:
     """Compress WAV bytes to MP3 for smaller network transfer."""
@@ -56,9 +57,7 @@ def decompress_mp3_to_wav(mp3_bytes: bytes) -> bytes:
     audio.export(buffer, format="wav")
     return buffer.getvalue()
 
-# =============================================================================
 # Configuration & Registry
-# =============================================================================
 
 class ModelConfig:
     """Configuration for model selection"""
@@ -84,9 +83,7 @@ def register_model(model_type: str, name: str):
         return cls
     return decorator
 
-# =============================================================================
 # Base Model Classes
-# =============================================================================
 
 class ASRModel(ABC):
     @abstractmethod
@@ -133,10 +130,7 @@ class TTSModel(ABC):
     def model_name(self) -> str:
         pass
 
-# =============================================================================
 # ASR IMPLEMENTATIONS
-# =============================================================================
-
 @register_model("asr", "nemo")
 class NeMoASR(ASRModel):
     """NeMo RNNT 0.6B - Fast streaming ASR"""
@@ -223,10 +217,7 @@ class WhisperASR(ASRModel):
     def model_name(self) -> str:
         return "Whisper Large-v3"
 
-# =============================================================================
 # LLM IMPLEMENTATIONS
-# =============================================================================
-
 @register_model("llm", "phi3")
 class Phi3LLM(LLMModel):
     """Microsoft Phi-3-Mini 3.8B - Fast efficient LLM"""
@@ -389,10 +380,8 @@ class GPT4oMiniLLM(LLMModel):
     def model_name(self) -> str:
         return "GPT-4o Mini"
 
-# =============================================================================
-# TTS IMPLEMENTATIONS
-# =============================================================================
 
+# TTS IMPLEMENTATIONS
 @register_model("tts", "chatterbox")
 class ChatterboxTTS(TTSModel):
     """ChatterboxTTS Turbo 350M - Low latency TTS"""
@@ -433,10 +422,7 @@ class ChatterboxTTS(TTSModel):
     def model_name(self) -> str:
         return "ChatterboxTTS Turbo"
 
-# =============================================================================
 # Modal App Setup
-# =============================================================================
-
 app = modal.App("speech-to-speech")
 
 # Build image with all dependencies
@@ -458,9 +444,8 @@ image = (
     .pip_install("openai")  # Uncomment for OpenAI GPT models
 )
 
-# =============================================================================
+
 # Modular Pipeline Service
-# =============================================================================
 
 # Capture environment variables at deploy time to pass to container
 _ASR_MODEL = os.getenv("ASR_MODEL", "nemo")
@@ -714,10 +699,7 @@ class SpeechToSpeechService:
             }
         }
 
-# =============================================================================
-# Backward Compatible Wrapper (for existing client.py)
-# =============================================================================
-
+# Backward Compatible Wrapper (for existing client.py
 @app.function(image=image, timeout=600)
 def process_speech(audio_bytes: bytes) -> dict:
     """Wrapper for backward compatibility with client.py"""
@@ -731,10 +713,8 @@ def process_speech_streaming(audio_bytes: bytes):
     for chunk in service.process_streaming.remote_gen(audio_bytes):
         yield chunk
 
-# =============================================================================
-# Local Testing
-# =============================================================================
 
+# Local Testing
 @app.local_entrypoint()
 def main(audio_path: str):
     """
